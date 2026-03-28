@@ -1,0 +1,13 @@
+[Unit]
+Description=Ozma TinyNode HID listener
+After=network.target ozma-gadget.service
+Requires=ozma-gadget.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/ozma/tinynode/node/listener.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

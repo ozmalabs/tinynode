@@ -1,0 +1,13 @@
+[Unit]
+Description=Ozma USB gadget setup
+After=sys-kernel-config.mount
+Wants=sys-kernel-config.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/ozma/tinynode/gadget/setup_gadget.sh
+ExecStop=/opt/ozma/tinynode/gadget/teardown_gadget.sh
+
+[Install]
+WantedBy=multi-user.target
