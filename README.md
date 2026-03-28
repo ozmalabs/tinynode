@@ -10,7 +10,7 @@ The node connects to a host PC via USB and receives input/audio/video from the O
 |---|---|---|---|---|---|
 | **Milk-V Duo S** | Linux SBC (RISC-V) | Yes | Yes | Yes | [docs/setup_milkv_duo_s.md](docs/setup_milkv_duo_s.md) |
 | **Raspberry Pi Zero 2 W** | Linux SBC (ARM) | Yes | Yes | Yes | [docs/setup_raspberry_pi.md](docs/setup_raspberry_pi.md) |
-| **Teensy 4.1** | Bare-metal MCU | Yes | No | No | [docs/setup_teensy.md](docs/setup_teensy.md) |
+| **Teensy 4.1** | Bare-metal MCU | Yes | Yes | No | [docs/setup_teensy.md](docs/setup_teensy.md) |
 
 The Linux platforms (Duo S, RPi) use the same `gadget/` scripts and `node/listener.py` — only initial OS setup differs. The Teensy has its own Arduino firmware in `teensy/`.
 

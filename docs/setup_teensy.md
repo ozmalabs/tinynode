@@ -7,7 +7,7 @@ The Teensy 4.1 is a different class of device from the Linux SBCs:
 - **No OS overhead** — bare-metal firmware, sub-millisecond boot
 - **Native USB HID** — no gadget layer, no configfs, no kernel modules
 - **Built-in Ethernet PHY** — no hat or adapter needed on Teensy 4.1
-- **Trade-off:** No UAC audio or UVC camera — Teensy handles keyboard/mouse only (V0.1 scope)
+- **Trade-off:** No UVC camera — but USB audio (UAC) is supported natively via the Teensy Audio Library
 
 ## Hardware
 
@@ -34,9 +34,11 @@ Note: The Ethernet jack on Teensy 4.1 requires two resistors and a connector pop
 2. Set board and USB type:
    ```
    Tools → Board → Teensyduino → Teensy 4.1
-   Tools → USB Type → "Keyboard + Mouse + Joystick"
+   Tools → USB Type → "Keyboard + Mouse + Joystick"   ← V0.1 (HID only)
    Tools → CPU Speed → 600 MHz
    ```
+   For V0.3 audio support, switch to **"Serial + MIDI + Audio"** or a composite type that includes Audio — the Teensy Audio Library's `AudioInputUSB` / `AudioOutputUSB` objects handle UAC automatically.
+
    Use **"Serial + Keyboard + Mouse + Joystick"** while debugging (enables `Serial.print` output).
 
 3. Verify (compile) first, then Upload.
@@ -78,9 +80,9 @@ This removes the Serial interface, making the device enumerate slightly faster a
 | Feature | Linux SBC | Teensy 4.1 |
 |---|---|---|
 | HID keyboard + mouse | Yes | Yes |
-| UAC audio (V0.3) | Yes | No |
-| UVC camera (V0.6) | Yes | No |
+| UAC audio (V0.3) | Yes | Yes — via `AudioInputUSB` / `AudioOutputUSB` + VBAN over Ethernet |
+| UVC camera (V0.6) | Yes | No — Teensyduino has no UVC implementation |
 | Boot time | ~3–5 sec | < 1 sec |
 | Cost | ~$10–55 | ~$35 |
 
-The Teensy is best suited for a "minimum latency, keyboard/mouse only" node or for early prototyping before Linux node images are stable.
+The Teensy cannot do camera passthrough, but keyboard, mouse, and audio are all fully supported. It's a strong option for any node where you don't need camera.
