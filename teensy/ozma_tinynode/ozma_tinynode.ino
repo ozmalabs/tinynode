@@ -1,61 +1,71 @@
 /*
- * Ozma TinyNode — Teensy 4.1 firmware (V0.1)
+ * Ozma TinyNode — Teensy 4.1 firmware
  *
- * Receives UDP HID reports from the Ozma head node and injects them
- * as USB keyboard and mouse events via Teensyduino's built-in HID stack.
+ * Handles:
+ *   - USB HID keyboard + mouse (Teensyduino built-in)
+ *   - USB UVC camera / MJPEG stream (usb_uvc.c — bulk transfer)
  *
  * Hardware:
- *   Teensy 4.1 (has built-in Ethernet PHY — no shield needed)
+ *   Teensy 4.1 (built-in Ethernet PHY, no shield needed)
  *
  * Arduino IDE settings:
  *   Board:     Teensy 4.1
- *   USB Type:  "Keyboard + Mouse + Joystick"
- *              (use "Serial + Keyboard + Mouse + Joystick" while debugging)
+ *   USB Type:  "Serial + Keyboard + Mouse + Joystick"  (debugging)
+ *              "Keyboard + Mouse + Joystick"            (production)
  *   CPU Speed: 600 MHz
  *
- * Libraries (install via Library Manager or Teensyduino installer):
- *   NativeEthernet   — https://github.com/vjmuzik/NativeEthernet
- *   NativeEthernetUdp (bundled with NativeEthernet)
+ * IMPORTANT: Before building, apply the descriptor changes documented in
+ *   docs/teensy_uvc_integration.md to the Teensyduino core usb_desc.h/.c.
+ *   Without those changes the device will not enumerate as a UVC camera.
  *
- * Packet protocol (matches Linux listener.py):
- *   Byte 0:    type  0x01 = keyboard, 0x02 = mouse
- *   Bytes 1-N: payload
+ * Libraries (install via Library Manager):
+ *   NativeEthernet — https://github.com/vjmuzik/NativeEthernet
+ *
+ * UDP ports:
+ *   7331  HID events        (keyboard + mouse)
+ *   7332  MJPEG video       (one frame per datagram, max 64 KB)
+ *
+ * HID packet format (port 7331):
+ *   Byte 0:   type   0x01 = keyboard, 0x02 = mouse
+ *   Bytes 1+: payload
  *
  *   Keyboard payload (8 bytes):
  *     [modifier, reserved, key1, key2, key3, key4, key5, key6]
- *     Standard HID boot-protocol keyboard report.
  *
  *   Mouse payload (6 bytes):
  *     [buttons, x_lo, x_hi, y_lo, y_hi, scroll]
- *     x/y are int16, absolute, range 0–32767.
- *     buttons: bit0=left, bit1=right, bit2=middle
+ *     x/y are int16, absolute, 0–32767.
+ *
+ * Video packet format (port 7332):
+ *   Bytes 0-1: frame sequence number (uint16, big-endian) — for drop detection
+ *   Bytes 2+:  raw MJPEG frame data
+ *   Max useful payload: ~62000 bytes (UDP limit minus header).
+ *   For larger frames, lower MJPEG quality on the head node.
  *
  * Network:
- *   Tries DHCP first; falls back to static 10.0.100.20/24.
- *   UDP port: 7331
- *
- * Mouse positioning note:
- *   Mouse.moveTo() uses Teensyduino's absolute digitizer mode (added in
- *   Teensyduino 1.57). Range matches the 0–32767 HID coordinate space.
- *   If you are on an older Teensyduino without moveTo(), replace with
- *   relative Mouse.move() and track position manually.
+ *   Tries DHCP first (10s timeout), then falls back to static 10.0.100.20/24.
  */
 
 #include <NativeEthernet.h>
 #include <NativeEthernetUdp.h>
 
-// ---- Configuration --------------------------------------------------------
+extern "C" {
+#include "usb_uvc.h"
+}
 
-#define UDP_PORT      7331
-#define STATIC_IP     { 10, 0, 100, 20 }
-#define STATIC_GW     { 10, 0, 100, 1  }
-#define STATIC_SUBNET { 255, 255, 255, 0 }
+// ---- Configuration ----------------------------------------------------------
 
-#define TYPE_KEYBOARD 0x01
-#define TYPE_MOUSE    0x02
+#define UDP_HID_PORT    7331
+#define UDP_VIDEO_PORT  7332
 
-// ---- MAC address ----------------------------------------------------------
-// Teensy 4.1 has a factory-programmed MAC in fuse registers.
+#define STATIC_IP       { 10, 0, 100, 20 }
+#define STATIC_GW       { 10, 0, 100, 1  }
+#define STATIC_SUBNET   { 255, 255, 255, 0 }
+
+#define TYPE_KEYBOARD   0x01
+#define TYPE_MOUSE      0x02
+
+// ---- MAC address ------------------------------------------------------------
 
 static void readTeensyMAC(uint8_t mac[6]) {
   uint32_t m0 = HW_OCOTP_MAC0;
@@ -68,53 +78,92 @@ static void readTeensyMAC(uint8_t mac[6]) {
   mac[5] = m0;
 }
 
-// ---- Globals --------------------------------------------------------------
+// ---- Globals ----------------------------------------------------------------
 
-static uint8_t  mac[6];
-static EthernetUDP udp;
-static uint8_t  pkt[64];
+static uint8_t     mac[6];
+static EthernetUDP udpHID;
+static EthernetUDP udpVideo;
 
-// ---- HID handlers ---------------------------------------------------------
+// Receive buffers
+static uint8_t hidPkt[64];
 
-static void handleKeyboard(const uint8_t* payload, int len) {
+// Video receive buffer in DMAMEM so it's accessible by USB DMA.
+// 64 KB covers most 720p MJPEG frames at reasonable quality.
+static uint8_t __attribute__((aligned(32))) videoBuf[65536];
+
+// ---- HID handlers -----------------------------------------------------------
+
+static void handleKeyboard(const uint8_t *p, int len) {
   if (len != 8) return;
-  // payload: [modifier, reserved, key1..key6]
-  Keyboard.set_modifier(payload[0]);
-  Keyboard.set_key1(payload[2]);
-  Keyboard.set_key2(payload[3]);
-  Keyboard.set_key3(payload[4]);
-  Keyboard.set_key4(payload[5]);
-  Keyboard.set_key5(payload[6]);
-  Keyboard.set_key6(payload[7]);
+  Keyboard.set_modifier(p[0]);
+  Keyboard.set_key1(p[2]);
+  Keyboard.set_key2(p[3]);
+  Keyboard.set_key3(p[4]);
+  Keyboard.set_key4(p[5]);
+  Keyboard.set_key5(p[6]);
+  Keyboard.set_key6(p[7]);
   Keyboard.send_now();
 }
 
-static void handleMouse(const uint8_t* payload, int len) {
+static void handleMouse(const uint8_t *p, int len) {
   if (len != 6) return;
-  // payload: [buttons, x_lo, x_hi, y_lo, y_hi, scroll]
-  uint8_t buttons = payload[0];
-  int16_t x       = (int16_t)((uint16_t)payload[1] | ((uint16_t)payload[2] << 8));
-  int16_t y       = (int16_t)((uint16_t)payload[3] | ((uint16_t)payload[4] << 8));
-  int8_t  scroll  = (int8_t)payload[5];
-
-  // Absolute positioning — requires Teensyduino 1.57+
+  uint8_t buttons = p[0];
+  int16_t x       = (int16_t)((uint16_t)p[1] | ((uint16_t)p[2] << 8));
+  int16_t y       = (int16_t)((uint16_t)p[3] | ((uint16_t)p[4] << 8));
+  int8_t  scroll  = (int8_t)p[5];
   Mouse.moveTo(x, y, scroll);
-
-  // Button state (press/release on change)
   if (buttons & 0x01) Mouse.press(MOUSE_LEFT);   else Mouse.release(MOUSE_LEFT);
   if (buttons & 0x02) Mouse.press(MOUSE_RIGHT);  else Mouse.release(MOUSE_RIGHT);
   if (buttons & 0x04) Mouse.press(MOUSE_MIDDLE); else Mouse.release(MOUSE_MIDDLE);
 }
 
-// ---- Setup ----------------------------------------------------------------
+static void pollHID() {
+  int size = udpHID.parsePacket();
+  if (size < 2) return;
+  int len = udpHID.read(hidPkt, sizeof(hidPkt));
+  if (len < 2) return;
+  const uint8_t *payload = hidPkt + 1;
+  int plen = len - 1;
+  switch (hidPkt[0]) {
+    case TYPE_KEYBOARD: handleKeyboard(payload, plen); break;
+    case TYPE_MOUSE:    handleMouse(payload, plen);    break;
+  }
+}
+
+// ---- Video handler ----------------------------------------------------------
+
+static uint16_t lastVideoSeq = 0xFFFF;
+
+static void pollVideo() {
+  int size = udpVideo.parsePacket();
+  if (size < 3) return;  // need at least 2-byte seq + 1 byte MJPEG
+
+  int len = udpVideo.read(videoBuf, sizeof(videoBuf));
+  if (len < 3) return;
+
+  // First two bytes: frame sequence number (big-endian)
+  uint16_t seq = ((uint16_t)videoBuf[0] << 8) | videoBuf[1];
+  if (seq == lastVideoSeq) return;  // duplicate
+  lastVideoSeq = seq;
+
+  uint8_t *mjpeg     = videoBuf + 2;
+  size_t   mjpeg_len = (size_t)(len - 2);
+
+  if (!uvc_is_streaming()) return;
+
+  int rc = uvc_send_frame(mjpeg, mjpeg_len);
+  if (rc != 0) {
+    Serial.printf("uvc_send_frame failed (seq=%u, len=%u)\n", seq, (unsigned)mjpeg_len);
+  }
+}
+
+// ---- Setup ------------------------------------------------------------------
 
 void setup() {
   Serial.begin(115200);
-  // Brief wait for Serial monitor if debugging; harmless in production.
   delay(200);
 
   readTeensyMAC(mac);
-
   Serial.print("MAC: ");
   for (int i = 0; i < 6; i++) {
     if (i) Serial.print(":");
@@ -124,7 +173,7 @@ void setup() {
   Serial.println();
 
   Serial.print("DHCP... ");
-  if (Ethernet.begin(mac, 10000 /* ms timeout */)) {
+  if (Ethernet.begin(mac, 10000)) {
     Serial.print("OK — ");
     Serial.println(Ethernet.localIP());
   } else {
@@ -137,30 +186,26 @@ void setup() {
     Serial.println(Ethernet.localIP());
   }
 
-  udp.begin(UDP_PORT);
-  Serial.print("Listening on UDP port ");
-  Serial.println(UDP_PORT);
+  udpHID.begin(UDP_HID_PORT);
+  udpVideo.begin(UDP_VIDEO_PORT);
+
+  // Wait for USB to be configured before initialising UVC.
+  // usb_configuration is a Teensyduino global set to 1 when enumerated.
+  extern volatile uint8_t usb_configuration;
+  Serial.print("Waiting for USB host...");
+  while (!usb_configuration) delay(10);
+  Serial.println(" OK");
+
+  uvc_init();
+
+  Serial.printf("TinyNode ready — HID:%d  Video:%d\n",
+                UDP_HID_PORT, UDP_VIDEO_PORT);
 }
 
-// ---- Loop -----------------------------------------------------------------
+// ---- Loop -------------------------------------------------------------------
 
 void loop() {
-  // Maintain DHCP lease
   Ethernet.maintain();
-
-  int size = udp.parsePacket();
-  if (size < 2) return;
-
-  int len = udp.read(pkt, sizeof(pkt));
-  if (len < 2) return;
-
-  const uint8_t  type    = pkt[0];
-  const uint8_t* payload = pkt + 1;
-  const int      plen    = len - 1;
-
-  switch (type) {
-    case TYPE_KEYBOARD: handleKeyboard(payload, plen); break;
-    case TYPE_MOUSE:    handleMouse(payload, plen);    break;
-    default: break;  // unknown type — ignore
-  }
+  pollHID();
+  pollVideo();
 }
