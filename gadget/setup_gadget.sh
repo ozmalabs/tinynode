@@ -59,15 +59,34 @@ echo 6    > "${GADGET_DIR}/functions/hid.mouse/report_length"
 printf '\x05\x01\x09\x02\xa1\x01\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x05\x15\x00\x25\x01\x95\x05\x75\x01\x81\x02\x95\x01\x75\x03\x81\x03\x05\x01\x09\x30\x09\x31\x15\x00\x26\xff\x7f\x75\x10\x95\x02\x81\x02\x09\x38\x15\x81\x25\x7f\x75\x08\x95\x01\x81\x06\xc0\xc0' \
     > "${GADGET_DIR}/functions/hid.mouse/report_desc"
 
+# --- USB Serial (ACM) ---
+# Presents a virtual serial port to the target machine (/dev/ttyACM0 on the host).
+# The node reads this for console output — zero extra hardware, zero config on the
+# target beyond adding a console= kernel parameter.
+#
+# Target machine setup:
+#   Linux:   console=ttyACM0,115200  (add to GRUB_CMDLINE_LINUX in /etc/default/grub)
+#   FreeBSD: console="ucom0" in /boot/loader.conf
+#   Or just: echo "Hello from target" > /dev/ttyACM0
+#
+# One-liner to enable console on the target (run as root):
+#   grep -q ttyACM0 /etc/default/grub || \
+#     sed -i 's/GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 console=ttyACM0,115200"/' /etc/default/grub && \
+#     update-grub && echo "Serial console enabled — reboot to activate"
+#
+mkdir -p "${GADGET_DIR}/functions/acm.serial0"
+# No additional configuration needed — ACM just works
+
 # --- Configuration ---
 mkdir -p "${GADGET_DIR}/configs/c.1"
 echo 250 > "${GADGET_DIR}/configs/c.1/MaxPower"
 mkdir -p "${GADGET_DIR}/configs/c.1/strings/0x409"
-echo "Ozma HID" > "${GADGET_DIR}/configs/c.1/strings/0x409/configuration"
+echo "Ozma HID+Serial" > "${GADGET_DIR}/configs/c.1/strings/0x409/configuration"
 
 # Link functions into configuration
 ln -sf "${GADGET_DIR}/functions/hid.keyboard" "${GADGET_DIR}/configs/c.1/"
 ln -sf "${GADGET_DIR}/functions/hid.mouse"    "${GADGET_DIR}/configs/c.1/"
+ln -sf "${GADGET_DIR}/functions/acm.serial0"  "${GADGET_DIR}/configs/c.1/"
 
 # --- Bind to UDC (USB Device Controller) ---
 UDC="$(ls /sys/class/udc | head -1)"
@@ -78,5 +97,10 @@ fi
 echo "${UDC}" > "${GADGET_DIR}/UDC"
 
 echo "Gadget '${GADGET_NAME}' bound to UDC '${UDC}'"
-echo "  /dev/hidg0 → keyboard"
-echo "  /dev/hidg1 → mouse"
+echo "  /dev/hidg0  → keyboard"
+echo "  /dev/hidg1  → mouse"
+echo "  /dev/ttyGS0 → serial console (target sees /dev/ttyACM0)"
+echo ""
+echo "To enable serial console on the target machine (Linux), run:"
+echo "  sudo sed -i 's/GRUB_CMDLINE_LINUX=\"\\(.*\\)\"/GRUB_CMDLINE_LINUX=\"\\1 console=ttyACM0,115200\"/' /etc/default/grub"
+echo "  sudo update-grub && sudo reboot"
